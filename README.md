@@ -1,4 +1,4 @@
-# BiosToUefi
+# Invoke-BiosToUefi.ps1
 Convert a disk with BIOS (MBR) installation of Windows to UEFI (GPT)
 
 # Requirements
