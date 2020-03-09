@@ -369,7 +369,7 @@ function Capture-Image
             Throw "Failed to capture image with Dism"
         }
 
-        Write-Log -Message "Finished capturing $DataWimPath"
+        Write-Log -Message "Finished capturing $WimPath"
     }
     catch
     {
@@ -434,12 +434,12 @@ function New-Disk
         Write-Log -Message "Windows size: $WindowsSize"
         Write-Log -Message "Data size: $DataSize"
 
-        $TargetSize = 300MB # Partisjon 1: Skjulte gjennopprettingsverktøy
-        $TargetSize += 100MB # Partisjon 2: ESP
-        $TargetSize += 128MB # Partisjon 3: MSR
-        $TargetSize += $WindowsSize # Partisjon 4: Primærpartisjon med Windows
-        $TargetSize += $DataSize # Partisjon 5+: Datapartisjoner
-        $TargetSize += 3MB # GPT-tabeller
+        $TargetSize = 450MB # Partition 1: Hidden recovery tools
+        $TargetSize += 100MB # Partition 2: ESP
+        $TargetSize += 128MB # Partition 3: MSR
+        $TargetSize += $WindowsSize # Partition 4: Primary partition with Windows
+        $TargetSize += $DataSize # Partition 5+: Data partitions
+        $TargetSize += 3MB # GPT-tables
 
         Write-Log -Message "Size of new disk = $([Math]::Round(($TargetSize / 1GB), 2)) GB"
 
@@ -473,26 +473,26 @@ function Add-DiskPartition
         $DiskPartConfig = $script:Config.TempDir + "\Diskpart.txt"
         New-Item -Path $DiskPartConfig -ItemType File -Force | Out-Null
 
-        # Rensker disken og setter GPT layout
+        # Clean disk and set GPT layout
         Add-Content -Path $DiskPartConfig -Value "select disk $DiskNumber"
         Add-Content -Path $DiskPartConfig -Value "clean"
         Add-Content -Path $DiskPartConfig -Value "convert gpt"
 
-        # Oppretter gjenopprettingspartisjonen
-        Add-Content -Path $DiskPartConfig -Value "create partition efi size=300"
+        # Create recovery partition
+        Add-Content -Path $DiskPartConfig -Value "create partition efi size=450"
         Add-Content -Path $DiskPartConfig -Value "format quick fs=ntfs label=`"Windows RE tools`""
         Add-Content -Path $DiskPartConfig -Value "set id=`"de94bba4-06d1-4d40-a16a-bfd50179d6ac`""
         Add-Content -Path $DiskPartConfig -Value "gpt attributes=0x8000000000000001"
 
-        # Oppretter EFI system partisjon og tildeler bokstav
+        # Create EFI system partition
         Add-Content -Path $DiskPartConfig -Value "create partition efi size=100"
         Add-Content -Path $DiskPartConfig -Value "format quick fs=fat32 label=""System"""
 
-        # Oppretter Windows partisjonen
+        # Create Windows partition
         Add-Content -Path $DiskPartConfig -Value ("create partition primary size=" + [Math]::Ceiling($script:Config.SourceDisk.WindowsPartition.Size / 1MB))
         Add-Content -Path $DiskPartConfig -Value "format quick fs=ntfs label=`"Windows`""
 
-        # Oppretter datapartisjoner
+        # Create data partitions
         $Counter = 0
         foreach ($Partition in $script:Config.SourceDisk.DataPartitions)
         {
@@ -552,7 +552,6 @@ function Mount-DiskPartition
         $script:Config.DestinationDisk.BootPartition = Get-Partition -DiskNumber $DiskNumber -PartitionNumber 3
         $script:Config.DestinationDisk.WindowsPartition = Get-Partition -DiskNumber $DiskNumber -PartitionNumber 4
 
-        # Mount boot Partition
         $Params = @{
             DiskNumber = $script:Config.DestinationDisk.BootPartition.DiskNumber
             PartitionNumber = $script:Config.DestinationDisk.BootPartition.PartitionNumber
@@ -560,7 +559,6 @@ function Mount-DiskPartition
         }
         Add-PartitionAccessPath @Params
 
-        # Mount Windows Partition
         $Params = @{
             DiskNumber = $script:Config.DestinationDisk.WindowsPartition.DiskNumber
             PartitionNumber = $script:Config.DestinationDisk.WindowsPartition.PartitionNumber
@@ -574,7 +572,6 @@ function Mount-DiskPartition
         $NumberOfPartitions = (Get-Partition -DiskNumber $DiskNumber | Measure-Object).Count
         if ($NumberOfPartitions -gt 4)
         {
-            # Monterer datapartisjonene
             for ($PartitionNumber = 5; $PartitionNumber -le $NumberOfPartitions; $PartitionNumber++)
             {
                 Add-PartitionAccessPath -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber -AssignDriveLetter
@@ -699,12 +696,32 @@ try
         New-Item -ItemType Directory -Path $script:Config.TempDir | Out-Null
     }
 
+    if (-not (Test-Path -Path "$env:windir\System32\dism.exe"))
+    {
+        throw "Failed to find dism.exe in System32"
+    }
+
+    if (-not (Test-Path -Path "$env:windir\System32\diskpart.exe"))
+    {
+        throw "Failed to find diskpart.exe in System32"
+    }
+
+    if (-not (Test-Path -Path "$env:windir\System32\bcdboot.exe"))
+    {
+        throw "Failed to find bcdboot.exe in System32"
+    }
+
     if ($script:Config.SourceDisk.Path -like "*.vmdk")
     {
         Write-Log -Message "Input format VMDK detected. Converting temporarily to VMDX.."
         $script:Config.FromToVmdk = $true
         ConvertTo-Vhdx -DiskPath $script:Config.SourceDisk.Path
         $script:Config.SourceDisk.Path = $script:Config.SourceDisk.Path -replace "vmdk", "vhdx"
+
+        if (-not (Test-Path -Path "$PSScriptRoot\qemu-img\qemu-img.exe"))
+        {
+            throw "Failed to find $PSScriptRoot\qemu-img\qemu-img.exe. Qemy-img is necessary to convert from and to Vmdk format"
+        }
     }
 
     Write-Log -Message "Mount source disk"
@@ -742,10 +759,10 @@ try
         Remove-PartitionAccessPath -DiskNumber $DataPart.DiskNumber -PartitionNumber $DataPart.PartitionNumber -AccessPath $Drive
     }
 
-    Write-Log -Message "Create a new disk"
+    Write-Log -Message "Creating a new disk"
     New-Disk
 
-    Write-Log -Message "Mount new disk"
+    Write-Log -Message "Mount new vhdx disk"
     Mount-Disk -DiskPath $script:Config.DestinationDisk.Path
 
     Write-Log -Message "Partition the new disk"
@@ -791,6 +808,7 @@ finally
     Dismount-Disk -DiskPath $script:Config.DestinationDisk.Path
     Move-Item -Path $script:Config.DestinationDisk.Path -Destination (Split-Path -Path $script:Config.SourceDisk.Path -Parent)
     Remove-Item -Path $script:Config.TempDir -Recurse -Force
+    Write-Log -Message "Saved UEFI disk to $((Split-Path -Path $script:Config.SourceDisk.Path -Parent))"
 }
 
 #endregion logic
