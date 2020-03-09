@@ -7,6 +7,7 @@ Convert a disk with BIOS (MBR) installation of Windows to UEFI (GPT)
   - Windows is installed
   - WinRE is disabled, but can be enabled again after conversion
 - Admin workstation
+  - Windows OS (need to have diskpart and dism available)
   - PowerShell 5.1 or 7
   - Hyper-V PowerShell module installed (for New-VHD command)
   - At least 6 free drive letters
