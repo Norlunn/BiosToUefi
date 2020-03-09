@@ -12,6 +12,7 @@ Convert a disk with BIOS (MBR) installation of Windows to UEFI (GPT)
   - Hyper-V PowerShell module installed (for New-VHD command)
   - At least 6 free drive letters
   - Enough free space to host temporary files under the conversion. Temp files will be located in the script folder.
+  - qemu-img folder is required to be in script folder if using VMDK format
 
 # Command
 ```Powershell
