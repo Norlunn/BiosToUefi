@@ -7,11 +7,15 @@
 
     .DESCRIPTION
     Convert VHDX or VMDK disks from BIOS (MBR) to UEFI (GPT).
+    Also supports creating from Windows image (WIM) file.
     Only Windows installations are supported.
     Output format will be the same as input format.
 
     .PARAMETER SourceDisk
     Full path to the disk containing the BIOS installation of Windows
+
+    .PARAMETER SourceDisk
+    Full path to the Windows image containing the BIOS installation of Windows
 
     .EXAMPLE
     .\Invoke-BiosToUefi.ps1 -SourceDisk D:\disks\Win2019Bios.vmdk -Verbose
@@ -19,17 +23,29 @@
     .EXAMPLE
     .\Invoke-BiosToUefi.ps1 -SourceDisk D:\disks\Win2019Bios.vhdx -Verbose
 
+    .EXAMPLE
+    .\Invoke-BiosToUefi.ps1 -SourceWim D:\disks\Win2019Bios.wim -ExtraSpaceGB 15 -Verbose
+
     .NOTES
     Author: Martin Norlunn
-    Date: 09.03.2020
-    Version: 1.0
+    Date: 10.03.2020
+    Version: 1.1
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = "Disk")]
 param
 (
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, ParameterSetName = "Disk")]
     [ValidateScript({ Test-Path -Path $_ })]
-    [string]$SourceDisk
+    [string]$SourceDisk,
+    [Parameter(Mandatory, ParameterSetName = "Wim")]
+    [ValidateScript({ Test-Path -Path $_ })]
+    [string]$SourceWim,
+    [Parameter(ParameterSetName = "Wim")]
+    [ValidateRange(1, 16)]
+    [int]$WimIndex = 1,
+    [Parameter(ParameterSetName = "Wim")]
+    [ValidateRange(1, 1000)]
+    [int]$ExtraSpaceGB = 10
 )
 
 #region settings
@@ -43,8 +59,13 @@ $script:Config = [PSCustomObject]@{
     }
     SourceDisk = [PSCustomObject]@{
         DataPartitions = @()
-        Path = $SourceDisk
+        Path = $null
         WindowsPartition = $null
+    }
+    SourceWim = [PSCustomObject]@{
+        Path = $null
+        Size = $null
+        WimIndex = $WimIndex
     }
     TempDir = "$PSScriptRoot\Temp"
     FromToVmdk = $false
@@ -285,7 +306,15 @@ function Get-WinRE
 {
     try
     {
-        $MountPath = $script:Config.SourceDisk.WindowsPartition.DriveLetter + ":"
+        if ($null -eq $script:Config.SourceWim.Path)
+        {
+            $MountPath = $script:Config.SourceDisk.WindowsPartition.DriveLetter + ":"
+        }
+        else
+        {
+            $MountPath = "$($script:Config.TempDir)\Mount"
+        }
+
         $IsPBRConfigured = $false
         if (Test-Path -Path "$MountPath\windows\system32\recovery\reagent.xml")
         {
@@ -333,10 +362,12 @@ function Get-WinRE
                     Write-Log -Message "PBR is not configured"
                 }
             }
+            Write-Output $true
         }
         else
         {
             Write-Log -Message "WinRE is not configured"
+            Write-Output $false
         }
     }
     catch
@@ -382,9 +413,9 @@ function New-WinImage
     try
     {
         $MountPath = Get-PartitionLetter -Partition $script:Config.SourceDisk.WindowsPartition
-        $WindowsWimPath = "$($script:Config.TempDir)\WindowsPartition.wim"
+        $SourceWimPath = "$($script:Config.TempDir)\WindowsPartition.wim"
 
-        Capture-Image -MountPath $MountPath -WimPath $WindowsWimPath -Name 'Windows'
+        Capture-Image -MountPath $MountPath -WimPath $SourceWimPath -Name 'Windows'
     }
     catch
     {
@@ -417,18 +448,26 @@ function New-Disk
 {
     try
     {
-        If ($null -eq $script:Config.SourceDisk.WindowsPartition)
+        if ($null -eq $script:Config.SourceWim.Path)
         {
-            $WindowsSize = 0
+            if ($null -eq $script:Config.SourceDisk.WindowsPartition)
+            {
+                $WindowsSize = 0
+            }
+            else
+            {
+                $WindowsSize = [Math]::Ceiling($script:Config.SourceDisk.WindowsPartition.Size / 1MB) * 1MB
+            }
+
+            if (($script:Config.SourceDisk.DataPartitions | Measure-Object).Count -gt 0)
+            {
+                $DataSize = [Math]::Ceiling(($script:Config.SourceDisk.DataPartitions | Select-Object -ExpandProperty Size | Measure-Object -Sum).Sum / 1MB) * 1MB
+            }
         }
         else
         {
-            $WindowsSize = [Math]::Ceiling($script:Config.SourceDisk.WindowsPartition.Size / 1MB) * 1MB
-        }
-
-        if (($script:Config.SourceDisk.DataPartitions | Measure-Object).Count -gt 0)
-        {
-            $DataSize = [Math]::Ceiling(($script:Config.SourceDisk.DataPartitions | Select-Object -ExpandProperty Size | Measure-Object -Sum).Sum / 1MB) * 1MB
+            $WindowsSize = $script:Config.SourceWim.Size
+            $DataSize = 0
         }
 
         Write-Log -Message "Windows size: $WindowsSize"
@@ -443,7 +482,14 @@ function New-Disk
 
         Write-Log -Message "Size of new disk = $([Math]::Round(($TargetSize / 1GB), 2)) GB"
 
-        $script:Config.DestinationDisk.Path = $script:Config.TempDir + '\' + (Split-Path -Path ($script:Config.SourceDisk.Path -replace ".vhdx", " (UEFI).vhdx") -Leaf)
+        if ($null -eq $script:Config.SourceWim.Path)
+        {
+            $script:Config.DestinationDisk.Path = $script:Config.TempDir + '\' + (Split-Path -Path ($script:Config.SourceDisk.Path -replace ".vhdx", " (UEFI).vhdx") -Leaf)
+        }
+        else
+        {
+            $script:Config.DestinationDisk.Path = $script:Config.TempDir + '\' + (Split-Path -Path ($script:Config.SourceWim.Path -replace ".wim", " (UEFI).vhdx") -Leaf)
+        }
 
         Write-Log -Message "Creating new disk at $($script:Config.DestinationDisk.Path)"
         New-VHD -Path $script:Config.DestinationDisk.Path -Dynamic -SizeBytes $TargetSize | Out-Null
@@ -488,17 +534,26 @@ function Add-DiskPartition
         Add-Content -Path $DiskPartConfig -Value "create partition efi size=100"
         Add-Content -Path $DiskPartConfig -Value "format quick fs=fat32 label=""System"""
 
-        # Create Windows partition
-        Add-Content -Path $DiskPartConfig -Value ("create partition primary size=" + [Math]::Ceiling($script:Config.SourceDisk.WindowsPartition.Size / 1MB))
-        Add-Content -Path $DiskPartConfig -Value "format quick fs=ntfs label=`"Windows`""
-
-        # Create data partitions
-        $Counter = 0
-        foreach ($Partition in $script:Config.SourceDisk.DataPartitions)
+        if ($null -eq $script:Config.SourceWim.Path)
         {
-            $Counter++
-            Add-Content -Path $DiskPartConfig -Value ("create partition primary size=" + [Math]::Ceiling($Partition.Size / 1MB))
-            Add-Content -Path $DiskPartConfig -Value "format quick fs=ntfs label=`"Data $Counter`""
+            # Create Windows partition
+            Add-Content -Path $DiskPartConfig -Value ("create partition primary size=" + [Math]::Ceiling($script:Config.SourceDisk.WindowsPartition.Size / 1MB))
+            Add-Content -Path $DiskPartConfig -Value "format quick fs=ntfs label=`"Windows`""
+
+            # Create data partitions
+            $Counter = 0
+            foreach ($Partition in $script:Config.SourceDisk.DataPartitions)
+            {
+                $Counter++
+                Add-Content -Path $DiskPartConfig -Value ("create partition primary size=" + [Math]::Ceiling($Partition.Size / 1MB))
+                Add-Content -Path $DiskPartConfig -Value "format quick fs=ntfs label=`"Data $Counter`""
+            }
+        }
+        else
+        {
+            # Create Windows partition
+            Add-Content -Path $DiskPartConfig -Value ("create partition primary") #size=" + [Math]::Ceiling($script:Config.SourceWim.Size / 1MB))
+            Add-Content -Path $DiskPartConfig -Value "format quick fs=ntfs label=`"Windows`""
         }
 
         Add-Content -Path $DiskPartConfig -Value "exit"
@@ -596,11 +651,23 @@ function Apply-WindowsImage
         }
 
         Write-Log -Message "Applying windows image"
-        $WinImage = "$($script:Config.TempDir)\WindowsPartition.wim"
-        dism.exe /Apply-Image /ImageFile:$WinImage /Index:1 /ApplyDir:$WinDrive
-        if (-not $?)
+        if ($null -eq $script:Config.SourceWim.Path)
         {
-            throw "Failed applying Windows image $WinImage to partition $($script:Config.DestinationDisk.WindowsPartition.PartitionNumber) on disk $($script:Config.DestinationDisk.WindowsPartition.DiskNumber)"
+            $WinImage = "$($script:Config.TempDir)\WindowsPartition.wim"
+            dism.exe /Apply-Image /ImageFile:$WinImage /Index:1 /ApplyDir:$WinDrive
+            if (-not $?)
+            {
+                throw "Failed applying Windows image $WinImage to partition $($script:Config.DestinationDisk.WindowsPartition.PartitionNumber) on disk $($script:Config.DestinationDisk.WindowsPartition.DiskNumber)"
+            }
+        }
+        else
+        {
+            $WinImage = $script:Config.SourceWim.Path
+            dism.exe /Apply-Image /ImageFile:$WinImage /Index:$script:Config.SourceWim.WimIndex /ApplyDir:$WinDrive
+            if (-not $?)
+            {
+                throw "Failed applying Windows image $WinImage to partition $($script:Config.DestinationDisk.WindowsPartition.PartitionNumber) on disk $($script:Config.DestinationDisk.WindowsPartition.DiskNumber)"
+            }
         }
 
         $EfiDrive = Get-PartitionLetter -Partition $script:Config.DestinationDisk.BootPartition
@@ -610,7 +677,7 @@ function Apply-WindowsImage
         }
 
         Write-Log -Message "Configuring EFI system partition"
-        bcdboot.exe "$Drive\windows" /s $EfiDrive /f UEFI
+        bcdboot.exe "$WinDrive\windows" /s $EfiDrive /f UEFI
     }
     catch
     {
@@ -711,88 +778,135 @@ try
         throw "Failed to find bcdboot.exe in System32"
     }
 
-    if ($script:Config.SourceDisk.Path -like "*.vmdk")
+    if ($PSBoundParameters.ContainsKey('SourceDisk'))
     {
-        Write-Log -Message "Input format VMDK detected. Converting temporarily to VMDX.."
-        $script:Config.FromToVmdk = $true
-        ConvertTo-Vhdx -DiskPath $script:Config.SourceDisk.Path
-        $script:Config.SourceDisk.Path = $script:Config.SourceDisk.Path -replace "vmdk", "vhdx"
+        # Input is Vhdx or Vmdk
+        $script:Config.SourceDisk.Path = $SourceDisk
 
-        if (-not (Test-Path -Path "$PSScriptRoot\qemu-img\qemu-img.exe"))
+        if ($script:Config.SourceDisk.Path -like "*.vmdk")
         {
-            throw "Failed to find $PSScriptRoot\qemu-img\qemu-img.exe. Qemy-img is necessary to convert from and to Vmdk format"
+            Write-Log -Message "Input format VMDK detected. Converting temporarily to VMDX.."
+            $script:Config.FromToVmdk = $true
+            ConvertTo-Vhdx -DiskPath $script:Config.SourceDisk.Path
+            $script:Config.SourceDisk.Path = $script:Config.SourceDisk.Path -replace "vmdk", "vhdx"
+
+            if (-not (Test-Path -Path "$PSScriptRoot\qemu-img\qemu-img.exe"))
+            {
+                throw "Failed to find $PSScriptRoot\qemu-img\qemu-img.exe. Qemy-img is necessary to convert from and to Vmdk format"
+            }
+        }
+
+        Write-Log -Message "Mounting source disk"
+        Mount-Disk -DiskPath $script:Config.SourceDisk.Path -NoDriveLetter -Access ReadOnly
+
+        # Find what partition have Windows installed, and which are pure data partitions (not boot)
+        Find-Partitions -DiskPath $script:Config.SourceDisk.Path
+
+        Write-Log -Message "Mounting Windows partition"
+        $Params = @{
+            DiskNumber = $script:Config.SourceDisk.WindowsPartition.DiskNumber
+            PartitionNumber = $script:Config.SourceDisk.WindowsPartition.PartitionNumber
+            AssignDriveLetter = $true
+        }
+        Add-PartitionAccessPath @Params
+
+        # Need to wait until a drive letter is assigned
+        $null = Get-PartitionLetter -Partition $script:Config.DestinationDisk.WindowsPartition
+
+        $Params.Remove('AssignDriveLetter')
+        $script:Config.DestinationDisk.WindowsPartition += Get-Partition @Params
+
+        Write-Log -Message "Check Windows Recovery Environment (WinRE)"
+        if (Get-WinRE)
+        {
+            throw "WinRE is configured. Aborting script.."
+        }
+
+        Write-Log -Message "Capture Windows partition to WIM file"
+        New-WinImage
+
+        Write-Log -Message "Capture data partitions to WIM files"
+        foreach ($DataPart in $script:Config.SourceDisk.DataPartitions)
+        {
+            Add-PartitionAccessPath -DiskNumber $DataPart.DiskNumber -PartitionNumber $DataPart.PartitionNumber -AssignDriveLetter
+            $Drive = Get-PartitionLetter -Partition $DataPart
+            New-DataImage -MountPath $Drive
+            Remove-PartitionAccessPath -DiskNumber $DataPart.DiskNumber -PartitionNumber $DataPart.PartitionNumber -AccessPath $Drive
+        }
+
+        Write-Log -Message "Creating a new disk"
+        New-Disk
+
+        Write-Log -Message "Mounting new vhdx disk"
+        Mount-Disk -DiskPath $script:Config.DestinationDisk.Path
+
+        Write-Log -Message "Partition the new disk"
+        Add-DiskPartition
+
+        Write-Log -Message "Dismount source disk image"
+        Dismount-DiskImage -ImagePath $script:Config.SourceDisk.Path
+
+        Write-Log -Message "Mounting boot and windows partitions of new disk"
+        Mount-DiskPartition
+
+        Write-Log -Message "Applying Windows image and configuring EFI system partition"
+        Apply-WindowsImage
+
+        Write-Log -Message "Applying data partition images"
+        Apply-DataImage
+
+        Write-Log -Message "Dismounting disks"
+        Dismount-Disk -DiskPath $script:Config.SourceDisk.Path
+        Dismount-Disk -DiskPath $script:Config.DestinationDisk.Path
+
+        if ($script:Config.FromToVmdk)
+        {
+            Write-Log -Message "Converting final VHDX back to VMDK format"
+            ConvertTo-Vmdk -DiskPath $script:Config.DestinationDisk.Path
+            if (-not $?)
+            {
+                Throw "Unable to convert final VHDX to VMDK"
+            }
+            $script:Config.DestinationDisk.Path = $script:Config.DestinationDisk.Path -replace "vhdx", "vmdk"
         }
     }
-
-    Write-Log -Message "Mount source disk"
-    Mount-Disk -DiskPath $script:Config.SourceDisk.Path -NoDriveLetter -Access ReadOnly
-
-    # Find what partition have Windows installed, and which are pure data partitions (not boot)
-    Find-Partitions -DiskPath $script:Config.SourceDisk.Path
-
-    Write-Log -Message "Mount Windows partition"
-    $Params = @{
-        DiskNumber = $script:Config.SourceDisk.WindowsPartition.DiskNumber
-        PartitionNumber = $script:Config.SourceDisk.WindowsPartition.PartitionNumber
-        AssignDriveLetter = $true
-    }
-    Add-PartitionAccessPath @Params
-
-    # Need to wait until a drive letter is assigned
-    $null = Get-PartitionLetter -Partition $script:Config.DestinationDisk.WindowsPartition
-
-    $Params.Remove('AssignDriveLetter')
-    $script:Config.DestinationDisk.WindowsPartition += Get-Partition @Params
-
-    Write-Log -Message "Check Windows Recovery Environment (WinRE)"
-    Get-WinRE
-
-    Write-Log -Message "Capture Windows partition to WIM file"
-    New-WinImage
-
-    Write-Log -Message "Capture data partitions to WIM files"
-    foreach ($DataPart in $script:Config.SourceDisk.DataPartitions)
+    elseif ($PSBoundParameters.ContainsKey('WindowsWim'))
     {
-        Add-PartitionAccessPath -DiskNumber $DataPart.DiskNumber -PartitionNumber $DataPart.PartitionNumber -AssignDriveLetter
-        $Drive = Get-PartitionLetter -Partition $DataPart
-        New-DataImage -MountPath $Drive
-        Remove-PartitionAccessPath -DiskNumber $DataPart.DiskNumber -PartitionNumber $DataPart.PartitionNumber -AccessPath $Drive
-    }
+        $script:Config.SourceWim.Path = $SourceWim
+        $script:Config.SourceWim.Size = [Math]::Ceiling((Get-WindowsImage -ImagePath $script:Config.SourceWim.Path).ImageSize / 1MB) * 1MB
+        $script:Config.SourceWim.Size += $ExtraSpaceGB * 1GB # For good measure. Always handy with a little extra space..
 
-    Write-Log -Message "Creating a new disk"
-    New-Disk
-
-    Write-Log -Message "Mount new vhdx disk"
-    Mount-Disk -DiskPath $script:Config.DestinationDisk.Path
-
-    Write-Log -Message "Partition the new disk"
-    Add-DiskPartition
-
-    Write-Log -Message "Dismount source disk image"
-    Dismount-DiskImage -ImagePath $script:Config.SourceDisk.Path
-
-    Write-Log -Message "Mount boot and windows partitions of new disk"
-    Mount-DiskPartition
-
-    Write-Log -Message "Apply Windows image and configure EFI system partition"
-    Apply-WindowsImage
-
-    Write-Log -Message "Apply data partition images"
-    Apply-DataImage
-
-    Write-Log -Message "Dismounting disks"
-    Dismount-Disk -DiskPath $script:Config.SourceDisk.Path
-    Dismount-Disk -DiskPath $script:Config.DestinationDisk.Path
-
-    if ($script:Config.FromToVmdk)
-    {
-        Write-Log -Message "Converting final VHDX back to VMDK format"
-        ConvertTo-Vmdk -DiskPath $script:Config.DestinationDisk.Path
-        if (-not $?)
+        if (-not (Test-Path -Path "$($script:Config.TempDir)\Mount"))
         {
-            Throw "Unable to convert final VHDX to VMDK"
+            New-Item -ItemType Directory -Path "$($script:Config.TempDir)\Mount" | Out-Null
         }
-        $script:Config.DestinationDisk.Path = $script:Config.DestinationDisk.Path -replace "vhdx", "vmdk"
+
+        Write-Log -Message "Mounting source image (WIM) at $($script:Config.TempDir)\Mount"
+        Mount-WindowsImage -ImagePath $script:Config.SourceWim.Path -Index $script:Config.SourceWim.WimIndex -Path "$($script:Config.TempDir)\Mount"
+
+        Write-Log -Message "Check Windows Recovery Environment (WinRE)"
+        if (Get-WinRE)
+        {
+            throw "WinRE is configured. Aborting script.."
+        }
+
+        Write-Log -Message "Dismounting source image (WIM) at $($script:Config.TempDir)\Mount"
+        Dismount-WindowsImage -Path "$($script:Config.TempDir)\Mount" -Discard
+
+        Write-Log -Message "Creating a new disk"
+        New-Disk
+
+        Write-Log -Message "Mount new vhdx disk"
+        Mount-Disk -DiskPath $script:Config.DestinationDisk.Path
+
+        Write-Log -Message "Partitioning the new disk"
+        Add-DiskPartition
+
+        Write-Log -Message "Mounting boot and windows partitions of the new disk"
+        Mount-DiskPartition
+
+        Write-Log -Message "Applying Windows image and configuring EFI system partition"
+        Apply-WindowsImage
     }
 
     Write-Log -Message "Conversion is finished. Remember to enable Windows Recovery Environment in the guest OS again. Run 'reagentc /enable' and verify with 'reagentc /info'"
@@ -804,11 +918,26 @@ catch
 finally
 {
     Write-Log -Message "Finishing up script. Doing cleanup.."
-    Dismount-Disk -DiskPath $script:Config.SourceDisk.Path
-    Dismount-Disk -DiskPath $script:Config.DestinationDisk.Path
-    Move-Item -Path $script:Config.DestinationDisk.Path -Destination (Split-Path -Path $script:Config.SourceDisk.Path -Parent)
-    Remove-Item -Path $script:Config.TempDir -Recurse -Force
-    Write-Log -Message "Saved UEFI disk to $((Split-Path -Path $script:Config.SourceDisk.Path -Parent))"
+
+    if ($PSBoundParameters.ContainsKey('SourceDisk'))
+    {
+        Dismount-Disk -DiskPath $script:Config.SourceDisk.Path
+        Dismount-Disk -DiskPath $script:Config.DestinationDisk.Path
+        Move-Item -Path $script:Config.DestinationDisk.Path -Destination (Split-Path -Path $script:Config.SourceDisk.Path -Parent)
+        Remove-Item -Path $script:Config.TempDir -Recurse -Force
+        Write-Log -Message "Saved UEFI disk to $((Split-Path -Path $script:Config.SourceDisk.Path -Parent))"
+    }
+    elseif ($PSBoundParameters.ContainsKey('WindowsWim'))
+    {
+        if (Get-ChildItem -Path "$($script:Config.TempDir)\Mount" -ErrorAction SilentlyContinue)
+        {
+            Write-Log -Message "Dismounting source image (WIM) at $($script:Config.TempDir)\Mount"
+            Dismount-WindowsImage -Path "$($script:Config.TempDir)\Mount" -Discard
+        }
+
+        Move-Item -Path $script:Config.DestinationDisk.Path -Destination (Split-Path -Path $script:Config.SourceWim.Path -Parent)
+        Remove-Item -Path $script:Config.TempDir -Recurse -Force
+    }
 }
 
 #endregion logic
