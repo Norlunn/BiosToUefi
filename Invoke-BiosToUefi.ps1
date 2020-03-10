@@ -870,7 +870,7 @@ try
             $script:Config.DestinationDisk.Path = $script:Config.DestinationDisk.Path -replace "vhdx", "vmdk"
         }
     }
-    elseif ($PSBoundParameters.ContainsKey('WindowsWim'))
+    elseif ($PSBoundParameters.ContainsKey('SourceWim'))
     {
         $script:Config.SourceWim.Path = $SourceWim
         $script:Config.SourceWim.Size = [Math]::Ceiling((Get-WindowsImage -ImagePath $script:Config.SourceWim.Path).ImageSize / 1MB) * 1MB
@@ -927,7 +927,7 @@ finally
         Remove-Item -Path $script:Config.TempDir -Recurse -Force
         Write-Log -Message "Saved UEFI disk to $((Split-Path -Path $script:Config.SourceDisk.Path -Parent))"
     }
-    elseif ($PSBoundParameters.ContainsKey('WindowsWim'))
+    elseif ($PSBoundParameters.ContainsKey('SourceWim'))
     {
         if (Get-ChildItem -Path "$($script:Config.TempDir)\Mount" -ErrorAction SilentlyContinue)
         {
