@@ -6,6 +6,7 @@ Convert a disk with BIOS (MBR) installation of Windows to UEFI (GPT)
   - VMDK or VHDX
   - Windows is installed
   - WinRE is disabled, but can be enabled again after conversion
+  - If source disk is not available, you can create one in the source OS with Disk2vhd
 - Admin workstation
   - Windows OS (need to have diskpart, bcdboot and dism available)
   - PowerShell 5.1 or 7 (Run as Administrator)
