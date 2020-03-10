@@ -44,6 +44,9 @@ param
     [ValidateRange(1, 16)]
     [int]$WimIndex = 1,
     [Parameter(ParameterSetName = "Wim")]
+    [ValidateSet('Vhdx', 'Vmdk')]
+    [string]$OutFormat = 'Vhdx',
+    [Parameter(ParameterSetName = "Wim")]
     [ValidateRange(1, 1000)]
     [int]$ExtraSpaceGB = 10
 )
@@ -327,11 +330,12 @@ function Get-WinRE
                 if ($XMLNoder.State -eq 1)
                 {
                     Write-Log -Message "WinRE is configured"
-                    throw "WinRE is configured. Deactive this in the guest OS with the command 'reagentc /disable' first"
+                    return $true
                 }
                 else
                 {
                     Write-Log -Message "WinRE is not configured"
+                    return $false
                 }
             }
             else
@@ -356,18 +360,19 @@ function Get-WinRE
                 {
                     $IsPBRConfigured = $true
                     Write-Log -Message "PBR is configured"
+                    return $true
                 }
                 else
                 {
                     Write-Log -Message "PBR is not configured"
+                    return $false
                 }
             }
-            Write-Output $true
         }
         else
         {
             Write-Log -Message "WinRE is not configured"
-            Write-Output $false
+            return $false
         }
     }
     catch
@@ -663,10 +668,10 @@ function Apply-WindowsImage
         else
         {
             $WinImage = $script:Config.SourceWim.Path
-            dism.exe /Apply-Image /ImageFile:$WinImage /Index:$script:Config.SourceWim.WimIndex /ApplyDir:$WinDrive
+            dism.exe /Apply-Image /ImageFile:$WinImage /Index:"$($script:Config.SourceWim.WimIndex)" /ApplyDir:$WinDrive
             if (-not $?)
             {
-                throw "Failed applying Windows image $WinImage to partition $($script:Config.DestinationDisk.WindowsPartition.PartitionNumber) on disk $($script:Config.DestinationDisk.WindowsPartition.DiskNumber)"
+                throw "Failed applying Windows image $WinImage (index: $($script:Config.SourceWim.WimIndex)) to partition $($script:Config.DestinationDisk.WindowsPartition.PartitionNumber) on disk $($script:Config.DestinationDisk.WindowsPartition.DiskNumber) mounted on $WinDrive"
             }
         }
 
@@ -819,7 +824,7 @@ try
         Write-Log -Message "Check Windows Recovery Environment (WinRE)"
         if (Get-WinRE)
         {
-            throw "WinRE is configured. Aborting script.."
+            throw "WinRE is configured. Deactive this in the guest OS with the command 'reagentc /disable' first. Aborting script.."
         }
 
         Write-Log -Message "Capture Windows partition to WIM file"
@@ -881,17 +886,17 @@ try
             New-Item -ItemType Directory -Path "$($script:Config.TempDir)\Mount" | Out-Null
         }
 
-        Write-Log -Message "Mounting source image (WIM) at $($script:Config.TempDir)\Mount"
-        Mount-WindowsImage -ImagePath $script:Config.SourceWim.Path -Index $script:Config.SourceWim.WimIndex -Path "$($script:Config.TempDir)\Mount"
+        # Write-Log -Message "Mounting source image (WIM) at $($script:Config.TempDir)\Mount"
+        # Mount-WindowsImage -ImagePath $script:Config.SourceWim.Path -Index $script:Config.SourceWim.WimIndex -Path "$($script:Config.TempDir)\Mount" | Out-Null
 
-        Write-Log -Message "Check Windows Recovery Environment (WinRE)"
-        if (Get-WinRE)
-        {
-            throw "WinRE is configured. Aborting script.."
-        }
+        # Write-Log -Message "Check Windows Recovery Environment (WinRE)"
+        # if (Get-WinRE)
+        # {
+        #     throw "WinRE is configured. Deactive this in the guest OS with the command 'reagentc /disable' first. Aborting script.."
+        # }
 
-        Write-Log -Message "Dismounting source image (WIM) at $($script:Config.TempDir)\Mount"
-        Dismount-WindowsImage -Path "$($script:Config.TempDir)\Mount" -Discard
+        # Write-Log -Message "Dismounting source image (WIM) at $($script:Config.TempDir)\Mount"
+        # Dismount-WindowsImage -Path "$($script:Config.TempDir)\Mount" -Discard | Out-Null
 
         Write-Log -Message "Creating a new disk"
         New-Disk
@@ -907,6 +912,20 @@ try
 
         Write-Log -Message "Applying Windows image and configuring EFI system partition"
         Apply-WindowsImage
+
+        Write-Log -Message "Dismounting new disk"
+        Dismount-Disk -DiskPath $script:Config.DestinationDisk.Path
+
+        if ($OutFormat -eq 'Vmdk')
+        {
+            Write-Log -Message "Converting final VHDX to VMDK format"
+            ConvertTo-Vmdk -DiskPath $script:Config.DestinationDisk.Path
+            if (-not $?)
+            {
+                Throw "Unable to convert final VHDX to VMDK"
+            }
+            $script:Config.DestinationDisk.Path = $script:Config.DestinationDisk.Path -replace "vhdx", "vmdk"
+        }
     }
 
     Write-Log -Message "Conversion is finished. Remember to enable Windows Recovery Environment in the guest OS again. Run 'reagentc /enable' and verify with 'reagentc /info'"
