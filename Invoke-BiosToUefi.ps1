@@ -48,7 +48,9 @@ param
     [string]$OutFormat = 'Vhdx',
     [Parameter(ParameterSetName = "Wim")]
     [ValidateRange(1, 1000)]
-    [int]$ExtraSpaceGB = 10
+    [int]$ExtraSpaceGB = 10,
+    [Parameter(ParameterSetName = "Wim")]
+    [switch]$SkipWinRMCheck
 )
 
 #region settings
@@ -886,17 +888,24 @@ try
             New-Item -ItemType Directory -Path "$($script:Config.TempDir)\Mount" | Out-Null
         }
 
-        Write-Log -Message "Mounting source image (WIM) at $($script:Config.TempDir)\Mount"
-        Mount-WindowsImage -ImagePath $script:Config.SourceWim.Path -Index $script:Config.SourceWim.WimIndex -Path "$($script:Config.TempDir)\Mount" | Out-Null
-
-        Write-Log -Message "Check Windows Recovery Environment (WinRE)"
-        if (Get-WinRE)
+        if ($SkipWinRMCheck.IsPresent)
         {
-            throw "WinRE is configured. Deactive this in the guest OS with the command 'reagentc /disable' first. Aborting script.."
+            Write-Log -Message "Skipping WinRM check.."
         }
+        else
+        {
+            Write-Log -Message "Mounting source image (WIM) at $($script:Config.TempDir)\Mount"
+            Mount-WindowsImage -ImagePath $script:Config.SourceWim.Path -Index $script:Config.SourceWim.WimIndex -Path "$($script:Config.TempDir)\Mount" | Out-Null
 
-        Write-Log -Message "Dismounting source image (WIM) at $($script:Config.TempDir)\Mount"
-        Dismount-WindowsImage -Path "$($script:Config.TempDir)\Mount" -Discard | Out-Null
+            Write-Log -Message "Check Windows Recovery Environment (WinRE)"
+            if (Get-WinRE)
+            {
+                throw "WinRE is configured. Deactive this in the guest OS with the command 'reagentc /disable' first. Aborting script.."
+            }
+
+            Write-Log -Message "Dismounting source image (WIM) at $($script:Config.TempDir)\Mount"
+            Dismount-WindowsImage -Path "$($script:Config.TempDir)\Mount" -Discard | Out-Null
+        }
 
         Write-Log -Message "Creating a new disk"
         New-Disk
